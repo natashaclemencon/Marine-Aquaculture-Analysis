@@ -1,0 +1,232 @@
+
+
+```{r}
+library(terra) # raster handling
+library(tidyverse)
+library(sf)
+library(tmap) # map making
+library(kableExtra) # table formatting
+library(spData) # spatial data
+library(spDataLarge) # spatial data
+library(geodata) # spatial data
+library(kableExtra)
+```
+
+
+```{r}
+# read in raster and shapefile data
+temp2008 <- rast("data 4/average_annual_sst_2008.tif")
+temp2009 <- rast("data 4/average_annual_sst_2009.tif")
+temp2010 <- rast("data 4/average_annual_sst_2010.tif")
+temp2011 <- rast("data 4/average_annual_sst_2011.tif")
+temp2012 <- rast("data 4/average_annual_sst_2012.tif")
+oceandepth <- rast("data 4/depth.tif")
+eezboundaries <- st_read("data 4/wc_regions_clean.shp")
+```
+```{r}
+# test CRS's of each object to make sure they match
+print(st_crs(temp2008))
+print(st_crs(temp2009))
+print(st_crs(temp2010)) 
+print(st_crs(temp2011))
+print(st_crs(temp2012))
+
+print(st_crs(oceandepth)) 
+print(st_crs(eezboundaries))
+
+
+```
+
+```{r}
+
+# Create new raster for all 5 years
+SST <- c(temp2008,temp2009, temp2010, temp2011, temp2012)
+# Make sure they stacked 
+plot(SST)
+
+# Reproject depth and EEZ CRS's to make sure they match SST 
+oceandepth <- project (oceandepth, SST)
+eezboundaries <- st_transform(eezboundaries, crs(SST))
+```
+
+
+```{r}
+# Find the mean SST across all 5 years
+fiveyearmean <- mean(SST, na.rm = TRUE)
+```
+
+```{r}
+# Switch the temperature to Celsius 
+fiveyearmeancelsius <- fiveyearmean - 273.15
+```
+```{r}
+# Change resolution, extent, and CRS of depth to match fiveyearmeancelsius
+croppeddepth <-crop(oceandepth, fiveyearmeancelsius)
+# Don't technically actually need to change resolution because project changed it already.
+# croppedresdepth <- resample(croppeddepth, fiveyearmeancelsius, method="bilinear")
+crs(croppeddepth) <- crs(fiveyearmeancelsius)
+```
+
+
+```{r}
+# Make sure CRS's match so you can stack the two rasters.
+
+if(crs(croppeddepth) == crs(fiveyearmeancelsius)){
+  print("CRS's match")
+}else{(warning("CRS's do not match"))
+}
+```
+```{r}
+# Make sure extents, CRS's and resolution matches before stacking rasters. 
+cat("\n=== Extents of Rasters ===\n")
+cat("Cropped Depth Extent:", dim(croppeddepth), "\n")
+cat("Original SST Extent"); dim(fiveyearmeancelsius)
+cat("CRS match"); same.crs(croppeddepth, fiveyearmeancelsius)
+```
+
+```{r}
+# Stack the two rasters
+tempdepth <- c(fiveyearmeancelsius, croppeddepth)
+```
+
+```{r}
+plot(tempdepth)
+```
+
+```{r}
+# Create a matrix for the growth levels
+rcldepth <- matrix(c(
+   -Inf, -70, 0, 
+   -70,   0,  1,
+   0,  Inf,  0
+), ncol = 3, byrow = TRUE)
+
+# Matrix for temperature
+rcltemp <- matrix(c(
+   -Inf,   11,  0,
+   11,  30,  1,
+  30,  Inf,  0
+), ncol = 3, byrow = TRUE)
+
+# Create rasters for suitable temp and suitable depth.
+suitabledepth <- (classify(croppeddepth, rcl = rcldepth))
+suitabletemp <- (classify(fiveyearmeancelsius, rcl = rcltemp))
+
+# Create a vector of suitable depth and suitable temp. 
+suitablezones <- c(suitabledepth, suitabletemp)
+
+plot(suitablezones)
+
+```
+
+```{r}
+# Find suitable areas for a species with lapp()
+suitableareas <- lapp(suitablezones, fun = function(s, d) s*d)
+```
+
+
+
+```{r}
+# Make suitableareas a raster
+eezraster <- rasterize(eezboundaries, suitableareas, field="rgn_id")
+```
+
+```{r}
+# Use cellSize function to find the total area within each EEZ zone.
+suitableareascellsize <- cellSize(suitableareas, unit="km", mask=TRUE)
+```
+
+```{r}
+# Mask eez to remove NAs and unsuitable zones. 
+eezmasked <- mask(suitableareascellsize, suitableareas, maskvalue=0)
+```
+
+```{r}
+plot(eezmasked)
+```
+
+```{r}
+zone <- zonal(eezmasked, eezraster, fun = "sum", na.rm=TRUE)
+
+kable(zone)
+
+map <- left_join(eezboundaries, zone, by="rgn_id")
+
+```
+
+
+## Function
+```{r}
+
+# Create function 
+
+suitable <- function(minsst, maxsst, mindepth, maxdepth, species_name)
+{
+# Create a matrix for the growth levels
+rcldepth <- matrix(c(
+   -Inf, maxdepth, 0, 
+   maxdepth,   mindepth,  1,
+   mindepth,  Inf,  0
+), ncol = 3, byrow = TRUE)
+
+# Matrix for temperature
+rcltemp <- matrix(c(
+   -Inf,   minsst,  0,
+   minsst,  maxsst,  1,
+  maxsst,  Inf,  0
+), ncol = 3, byrow = TRUE)
+
+# Create rasters for suitable temp and suitable depth.
+suitabledepth <- (classify(croppeddepth, rcl = rcldepth))
+suitabletemp <- (classify(fiveyearmeancelsius, rcl = rcltemp))
+
+# Create a vector of suitable depth and suitable temp. 
+suitablezones <- c(suitabledepth, suitabletemp)
+
+# Find suitable areas for a species with lapp()
+suitableareas <- lapp(suitablezones, fun = function(s, d) s*d)
+
+# Make suitableareas a raster
+eezraster <- rasterize(eezboundaries, suitableareas, field="rgn_id")
+
+# Use cellSize function to find the total area within each EEZ zone.
+suitableareascellsize <- cellSize(suitableareas, unit="km", mask=TRUE)
+
+# Mask eez to remove NAs and unsuitable zones. 
+eezmasked <- mask(suitableareascellsize, suitableareas, maskvalue=0)
+
+# Find the suitable zones in each region.
+zone <- zonal(eezmasked, eezraster, fun = "sum", na.rm=TRUE)
+
+# To make the map, first join the suitable regions by zone with the economic zone boundaries.
+map <- left_join(eezboundaries, zone, by="rgn_id")
+
+# Plot it!
+plot <- tm_shape(map)+
+tm_basemap("OpenStreetMap") +
+    tm_polygons(
+        fill='area'
+    )+
+tm_title(paste("Suitable", species_name, "Habitats"))+
+tm_text(text='rgn', size = 0.35)+
+tm_scalebar()+
+tm_add_legend(type="polygons"
+)
+
+return(plot)
+}
+
+```
+
+```{r}
+# Use function for oysters.
+suitable(11, 30, 0, -70, 'oysters')
+```
+From this visualization, we can tell that the central California coast has the most area of suitable habitat for oysters. 
+
+```{r}
+
+# Use function for red abalone. 
+suitable(0, 24, 0, -18, 'Red Abalone')
+```
+This visualization shows that the Washington coast has the most area of suitable habitat for red abalone. 
